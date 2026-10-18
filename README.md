@@ -1,128 +1,102 @@
 # Order & Payment API
 
-A modular monolith: Node.js + TypeScript + Express 5 + MongoDB (Mongoose) + Zod, with a small Next.js playground UI.
-JWT is implemented with Node's `crypto` (no extra dependency).
+Node.js, TypeScript, Express 5, MongoDB (Mongoose), Zod, JWT. A small Next.js UI and a mock payment page are included for trying it out.
 
 ## Run
 
 ```bash
 npm install && npm --prefix web install
-npm run db      # terminal 1: local MongoDB on 27017 (or use your own and set MONGO_URI)
-npm run dev     # terminal 2: API on http://localhost:3000 (seeds dev data on start)
-npm run web     # terminal 3: UI on http://localhost:3001
-npm run reset   # dev only: delete all orders/payments and restore seeded stock
-npm test        # tests use their own in-memory MongoDB
+npm run db      # MongoDB on :27017 (or set MONGO_URI to your own)
+npm run dev     # API on :3000, seeds dev data
+npm run web     # UI on :3001
 ```
 
-Environment (`.env.example`): `MONGO_URI`, `PORT`, `JWT_SECRET`, `CALLBACK_SECRET`.
-With `NODE_ENV=production` both secrets are required and seeding is disabled.
+Seeded users: `admin@example.com / admin123`, `user1@example.com / user123`, `user2@example.com / user123`.
+`npm run reset` deletes all orders and payments and restores the seeded products (dev only).
+Env (`.env.example`): `MONGO_URI`, `PORT`, `JWT_SECRET`, `CALLBACK_SECRET`. Both secrets are required when `NODE_ENV=production`.
 
-Seeded dev users: `admin@example.com / admin123`, `user1@example.com / user123`, `user2@example.com / user123`.
+## Tests
 
-## Structure
+`npm test` runs 9 tests against an in-memory MongoDB (it never touches your dev data) and prints one line per test:
 
-```
-src/
-  config.ts  app.ts  server.ts  seed.ts  dev-db.ts
-  shared/                  errors (central handler), logger, zod helpers
-  modules/
-    users/                 User model
-    auth/                  login, JWT, password hashing, auth/admin middleware
-    products/              Product model, routes, atomic stock reservation
-    orders/                Order model, routes, state machine (transitionOrder)
-    payments/              Payment model, routes, idempotency, provider callback
-web/                       Next.js UI (proxies /api/* to the API) + mock payment provider
-tests/                     Jest + Supertest
-```
+| # | Test |
+|---|---|
+| 1 | creates an order successfully |
+| 2 | rejects an unavailable product |
+| 3 | rejects insufficient stock and rolls back partial reservations |
+| 4 | a price change after the order does not affect the order |
+| 5 | a successful payment marks the order Paid |
+| 6 | duplicate callbacks neither pay twice nor change stock twice |
+| 7 | a repeated Idempotency-Key does not create a second payment |
+| 8 | rejects a payment with the wrong amount |
+| 9 | two concurrent requests for the last item: only one succeeds |
 
-Each module exposes a small public API through its `index.ts`, and other modules import only from there:
-
-```
-payments -> orders -> products
-   \          \-> auth (types)
-    \-> auth
-```
-
-- `products` owns stock: `reserveStock` / `releaseStock`. Nobody else touches the `stock` field.
-- `orders` owns order status: `transitionOrder` is the only code that changes it. Payments calls `settleOrder`, it never writes orders directly.
-- Routes only parse input and shape responses; rules live in `*.service.ts`.
+To see the same behavior against the running API, use `npm run demo` (curl walkthrough with expected results). The API terminal logs one line per request and business event.
 
 ## API
 
-| Method | Path | Auth | Notes |
-|---|---|---|---|
-| POST | `/auth/login` | - | `{email,password}` -> JWT |
-| GET | `/products?q=`, `/products/:id` | - | `q` = case-insensitive name search |
-| POST / PATCH | `/products`, `/products/:id` | admin | |
-| POST | `/orders` | user | `{items:[{productId,quantity}]}` |
-| GET | `/orders`, `/orders/:id` | user | own orders only |
-| POST | `/orders/:id/cancel` | user | the only client-driven status change |
-| POST | `/payments` | user | `Idempotency-Key` header + `{orderId, amount}` |
-| GET | `/payments/:id` | user | own payments only (used by the payment page) |
-| POST | `/payments/callback` | `x-callback-secret` header | called by the (fake) provider |
+| | Path | Auth |
+|---|---|---|
+| POST | `/auth/login` | - |
+| GET | `/products?q=`, `/products/:id` | - |
+| POST, PATCH | `/products`, `/products/:id` | admin |
+| POST, GET | `/orders`, `/orders/:id`, `GET /orders` | user (own orders only) |
+| POST | `/orders/:id/cancel` | user |
+| POST, GET | `/payments`, `/payments/:id` | user |
+| POST | `/payments/callback` | `x-callback-secret` header |
 
-Errors always look like `{ "success": false, "message": "...", "code": "..." }`. Stack traces are only logged server-side.
+Errors are always `{ "success": false, "message": "...", "code": "..." }`. Stack traces go to the server log only.
 
-## Stock management
-- Initial stock comes from `src/seed.ts` (dev only; it inserts missing products and never resets existing stock) or from `POST /products` (admin).
-- The task only requires that a product has `stock` and that orders deduct it. It does not require editing stock afterwards. `PATCH /products/:id` (admin, also used by the UI) is my addition so stock, price and `isActive` can be changed for testing.
-- Caveat: `PATCH` with `stock` is an absolute set. If it runs while orders are reserving stock, it overwrites their decrements. A real stock adjustment endpoint should use `$inc` with a delta.
+## Structure
 
-## Logging
-One line per request (`METHOD path status ms user code`) plus business events: `order.created`, `order.transition`, `stock.reserve_failed`, `payment.created`, `payment.replayed`, `payment.callback applied=true|false`. Request/response bodies, tokens and secrets are never logged. Unhandled errors are logged with their stack on the server and returned to the client as a generic 500. Logs are silent under Jest (`LOG=1` to enable).
+A modular monolith. Each module owns its data and exposes a small API through its `index.ts`.
 
-## UI and the mock payment provider
-- The UI keeps the JWT in `sessionStorage` (survives reloads and the trip to the payment page; cleared when the tab closes). An expired token signs the user out.
-- **Pay** creates the payment (with the order's `Idempotency-Key`) and redirects to `/pay/:id`, a mock hosted payment page. Its Pay button calls `POST /provider/callback` on the **Next server**, which adds the shared `CALLBACK_SECRET` and forwards to the API's `/payments/callback`. The browser never sees the secret, like a real provider webhook. Set `CALLBACK_SECRET` / `API_URL` for the web process if you changed the API's defaults.
-- Reloading the payment page after paying shows the stored result and cannot charge again.
+```
+src/modules/  users  auth  products  orders  payments
+src/shared/   errors (central handler), logger, validation
+web/          Next.js UI + mock payment provider
+```
+
+`products` is the only code that changes `stock`, and `orders` is the only code that changes an order's `status`. Routes parse input, services hold the rules.
 
 ## Design decisions
 
-### 1. Race condition (stock = 1)
-Every line is reserved with one atomic query:
-```ts
-Product.findOneAndUpdate({ _id, isActive: true, stock: { $gte: qty } }, { $inc: { stock: -qty } })
-```
-The condition and the decrement happen in a single operation on one document, which MongoDB serialises. Two concurrent buyers cannot both succeed: the second gets `null` and a `409 INSUFFICIENT_STOCK`. A "read, then write" approach would have a race window and is deliberately not used.
-If a later line of a multi-item order fails, earlier reservations are released.
+**Race condition.** Stock is reserved with one atomic query:
+`findOneAndUpdate({ _id, isActive: true, stock: { $gte: qty } }, { $inc: { stock: -qty } })`.
+Check and decrement happen in a single operation, so two buyers of the last item cannot both succeed. Read-then-write would leave a race window. If a later line of a multi-item order fails, earlier lines are released.
 
-### 2. When is stock deducted? (deliberate deviation from the task's flow)
-The task flow deducts stock after payment is confirmed. I reserve stock **when the order is created** and give it back on `Cancelled` / `Failed`. Reason: with deduction after payment, two users can both create an order and both pay for the last item, so one of them is charged for something that no longer exists.
-**Cost:** unpaid `Pending` orders hold stock. A real system needs an expiry job that cancels old `Pending` orders. Not implemented here.
+**When stock is deducted (differs from the task's flow).** The task deducts after payment is confirmed. I reserve at order creation and return the stock on `Cancelled` or `Failed`. Otherwise two users could both create an order and both pay for the last item. Cost: unpaid `Pending` orders hold stock, and an expiry job for them is not implemented.
 
-### 3. Idempotency
-- `POST /payments`: unique index on `(userId, idempotencyKey)`. A repeated request returns the same payment with an `Idempotent-Replayed: true` header. If two identical requests race, one fails with `E11000` and is converted into a replay. The same key with a different `orderId` returns `422`.
-- A second unique, partial index (`orderId` where `status = Pending`) prevents two in-flight payments for one order under different keys (`409 PAYMENT_IN_PROGRESS`).
-- `POST /payments/callback`: the state change itself is conditional: `findOneAndUpdate({ _id, status: 'Pending' }, ...)`. Only the first callback wins; later ones (even with a different status) change nothing and return the stored result. The order transition is conditional on `Pending` as well, so an order cannot become `Paid` twice and stock cannot be returned twice.
+**Idempotency.**
+- `POST /payments`: unique index on `(userId, idempotencyKey)`. A repeat returns the same payment (`200`, `Idempotent-Replayed: true`). If two identical requests race, one gets `E11000` and becomes a replay, so the index decides, not a pre-check. The same key for another order returns `422`.
+- A partial unique index on `orderId` (only while `Pending`) allows one in-flight payment per order, even under different keys (`409`).
+- `POST /payments/callback`: `findOneAndUpdate({ _id, status: 'Pending' }, ...)` means the first callback wins. Duplicates and conflicting callbacks return `200` and change nothing (providers retry until they get a 2xx). The order moves `Pending -> Paid | Failed` with the same conditional update, and stock is returned only by the update that actually changed the order, so it cannot happen twice.
 
-### 4. Price and amount tampering
-- Zod `.strict()` rejects unknown fields such as `price`. Prices are read from the DB and snapshotted into the order; the total is computed on the server.
-- The `amount` in `POST /payments` is only a check against the server-computed order total (`400 AMOUNT_MISMATCH`). The stored amount always comes from the order. The callback also compares its `amount` with the stored payment.
-- Money is an integer in minor units, never a float.
+**Price and amount tampering.** Zod `.strict()` rejects unknown fields such as `price`. Prices are read from the database and snapshotted into the order, and the server computes the total. The `amount` sent to `/payments` is only a check against `order.total` (`400 AMOUNT_MISMATCH`); the stored amount always comes from the order. The callback also checks its amount. Money is an integer, never a float.
 
-### 5. Order state machine
-`Pending -> Paid | Failed` only through the provider callback, `Pending -> Cancelled` only through the cancel endpoint. There is no endpoint that accepts a status. Each transition is one `findOneAndUpdate` with `status: 'Pending'` in the filter, so it is atomic.
+**Order state machine.** `Pending -> Paid | Failed` only through the provider callback, `Pending -> Cancelled` only through cancel. No endpoint accepts a status. Every transition is one conditional `findOneAndUpdate`.
 
-### 6. Security
-- JWT (HS256, 1 hour), passwords hashed with `scrypt` + salt. Login returns the same error for unknown email and wrong password.
-- Users only see their own orders; someone else's order returns `404`, not `403`, so its existence is not leaked.
-- The callback is protected by a shared secret with a timing-safe comparison. In production this would be an HMAC signature over the body plus a timestamp.
-- `OrderItem` is embedded in `Order`: it is always read and written with the order and never queried alone.
+**Validation and errors.** Zod on every input (ids, `quantity >= 1`, `amount >= 0`, required header). One error handler maps `AppError`, validation and unknown errors to the same response shape, and unknown errors are logged server-side and returned as a generic `500`.
 
-## Indexes
+**Security.** JWT (HS256, 1 hour) built on Node's `crypto`, passwords hashed with `scrypt` and a salt, one error message for unknown email and wrong password. Users only see their own orders and payments; someone else's id returns `404`. The callback is protected by a shared secret compared in constant time. In the UI the secret lives only on the Next server.
 
-| Collection | Index | Why / which query |
+## Database indexes
+
+| Collection | Index | Why / query |
 |---|---|---|
-| users | `email` unique | `POST /auth/login` (`findOne({email})`), prevents duplicate accounts |
-| products | `createdAt: -1` | `GET /products` (newest first) |
-| orders | `{userId: 1, createdAt: -1}` | `GET /orders` (my orders, sorted). The `userId` prefix also serves the ownership filter of `GET /orders/:id` |
-| payments | `{userId, idempotencyKey}` unique | idempotency lookup and guarantee |
-| payments | `{orderId}` unique, partial (`status = Pending`) | one in-flight payment per order |
-| all | `_id` (automatic) | `findById` in callback and single-item GETs |
+| users | `email` unique | login lookup, no duplicate accounts |
+| products | `createdAt: -1` | `GET /products` newest first |
+| orders | `{ userId, createdAt: -1 }` | `GET /orders` (my orders, sorted); the `userId` prefix also serves the ownership filter of `GET /orders/:id` |
+| payments | `{ userId, idempotencyKey }` unique | idempotency lookup and guarantee |
+| payments | `{ orderId }` unique, partial (`Pending`) | one in-flight payment per order |
+| all | `_id` | `findById` |
 
-**What goes wrong with too many indexes?** Every index must be updated on each insert, update and delete, so writes get slower. Indexes use RAM (the working set) and disk, and overlapping indexes make the planner's choice harder. So I only created indexes backed by a real query or a uniqueness rule. For example there is no index on `orders.status`, because nothing queries by it. Use `explain()` to check and drop unused indexes.
+Too many indexes make every insert, update and delete slower, use RAM and disk, and give the query planner more to choose from. So only indexes backed by a real query or a uniqueness rule exist; for example there is no index on `orders.status` because nothing queries by it.
 
-## Limitations (honest list)
-- No transactions (they need a replica set), so multi-step operations use compensation. If the process dies between "order -> Failed" and "stock released", stock leaks. Replica-set transactions would close that window.
-- Not implemented: expiry of `Pending` orders, refresh tokens, rate limiting, refunds (a successful payment for an already-cancelled order stays `Succeeded` and needs a refund path).
-- The UI is a test playground, not a product.
+## Not implemented / limitations
+
+- No transactions (they need a replica set). Multi-step changes use compensation, so a crash between "order -> Failed" and "stock returned" can leak stock.
+- Pending orders never expire. No refunds (a successful payment for an already cancelled order stays `Succeeded`).
+- The callback uses a shared secret, not an HMAC signature with a timestamp. Idempotency keys never expire and are not bound to the request body (same key and order with another amount returns the first payment).
+- No rate limiting, refresh tokens or user registration. `PATCH /products` sets `stock` absolutely, which can overwrite concurrent reservations; a real adjustment endpoint should use `$inc`.
+- `OrderItem` is embedded in `Order` instead of being its own collection: it is always read and written with the order.
