@@ -9,7 +9,8 @@
     "start": "node dist/src/server.js",
     "test": "NODE_OPTIONS=--experimental-vm-modules jest --runInBand --forceExit",
     "web": "npm --prefix web run dev",
-    "reset": "ts-node --transpile-only src/reset.ts"
+    "reset": "ts-node --transpile-only src/reset.ts",
+    "demo": "bash scripts/demo.sh"
   },
   "jest": {
     "preset": "ts-jest",
