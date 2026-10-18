@@ -1,85 +1,128 @@
 # Order & Payment API
 
-Node.js + TypeScript + Express 5 + MongoDB (Mongoose) + Zod. بدون وابستگی اضافه برای JWT (با `crypto` خود Node پیاده شده).
+A modular monolith: Node.js + TypeScript + Express 5 + MongoDB (Mongoose) + Zod, with a small Next.js playground UI.
+JWT is implemented with Node's `crypto` (no extra dependency).
 
-## اجرا
+## Run
 
 ```bash
-npm install
-npm run db      # ترمینال ۱: MongoDB لوکال روی 27017 (یا هر MongoDB دیگری؛ MONGO_URI را ست کنید)
-npm run dev     # ترمینال ۲: سرور + seed داده‌های dev  → http://localhost:3000  (UI همین‌جاست)
-npm test        # تست‌ها (MongoDB in-memory جدا می‌سازند، به db بالا دست نمی‌زنند)
+npm install && npm --prefix web install
+npm run db      # terminal 1: local MongoDB on 27017 (or use your own and set MONGO_URI)
+npm run dev     # terminal 2: API on http://localhost:3000 (seeds dev data on start)
+npm run web     # terminal 3: UI on http://localhost:3001
+npm run reset   # dev only: delete all orders/payments and restore seeded stock
+npm test        # tests use their own in-memory MongoDB
 ```
 
-متغیرهای محیطی (`.env.example`): `MONGO_URI`, `PORT`, `JWT_SECRET`, `CALLBACK_SECRET`.
-در حالت `NODE_ENV=production` دو secret اجباری‌اند و seed اجرا نمی‌شود.
+Environment (`.env.example`): `MONGO_URI`, `PORT`, `JWT_SECRET`, `CALLBACK_SECRET`.
+With `NODE_ENV=production` both secrets are required and seeding is disabled.
 
-کاربران seed (فقط dev): `admin@example.com / admin123`، `user1@example.com / user123`، `user2@example.com / user123`.
+Seeded dev users: `admin@example.com / admin123`, `user1@example.com / user123`, `user2@example.com / user123`.
+
+## Structure
+
+```
+src/
+  config.ts  app.ts  server.ts  seed.ts  dev-db.ts
+  shared/                  errors (central handler), logger, zod helpers
+  modules/
+    users/                 User model
+    auth/                  login, JWT, password hashing, auth/admin middleware
+    products/              Product model, routes, atomic stock reservation
+    orders/                Order model, routes, state machine (transitionOrder)
+    payments/              Payment model, routes, idempotency, provider callback
+web/                       Next.js UI (proxies /api/* to the API) + mock payment provider
+tests/                     Jest + Supertest
+```
+
+Each module exposes a small public API through its `index.ts`, and other modules import only from there:
+
+```
+payments -> orders -> products
+   \          \-> auth (types)
+    \-> auth
+```
+
+- `products` owns stock: `reserveStock` / `releaseStock`. Nobody else touches the `stock` field.
+- `orders` owns order status: `transitionOrder` is the only code that changes it. Payments calls `settleOrder`, it never writes orders directly.
+- Routes only parse input and shape responses; rules live in `*.service.ts`.
 
 ## API
 
-| Method | Path | Auth | توضیح |
+| Method | Path | Auth | Notes |
 |---|---|---|---|
-| POST | `/auth/login` | – | `{email,password}` → JWT |
-| GET | `/products`, `/products/:id` | – | |
+| POST | `/auth/login` | - | `{email,password}` -> JWT |
+| GET | `/products?q=`, `/products/:id` | - | `q` = case-insensitive name search |
 | POST / PATCH | `/products`, `/products/:id` | admin | |
 | POST | `/orders` | user | `{items:[{productId,quantity}]}` |
-| GET | `/orders`, `/orders/:id` | user | فقط سفارش‌های خود کاربر |
-| POST | `/orders/:id/cancel` | user | تنها تغییر وضعیت دست کلاینت (`Pending→Cancelled`) |
-| POST | `/payments` | user | هدر `Idempotency-Key` + `{orderId, amount}` |
-| POST | `/payments/callback` | هدر `x-callback-secret` | از طرف provider فرضی |
+| GET | `/orders`, `/orders/:id` | user | own orders only |
+| POST | `/orders/:id/cancel` | user | the only client-driven status change |
+| POST | `/payments` | user | `Idempotency-Key` header + `{orderId, amount}` |
+| GET | `/payments/:id` | user | own payments only (used by the payment page) |
+| POST | `/payments/callback` | `x-callback-secret` header | called by the (fake) provider |
 
-خطاها همیشه `{ "success": false, "message": "...", "code": "..." }` هستند؛ stack trace هرگز برنمی‌گردد (فقط در لاگ سرور).
+Errors always look like `{ "success": false, "message": "...", "code": "..." }`. Stack traces are only logged server-side.
 
-## تصمیم‌های طراحی
+## Stock management
+- Initial stock comes from `src/seed.ts` (dev only; it inserts missing products and never resets existing stock) or from `POST /products` (admin).
+- The task only requires that a product has `stock` and that orders deduct it. It does not require editing stock afterwards. `PATCH /products/:id` (admin, also used by the UI) is my addition so stock, price and `isActive` can be changed for testing.
+- Caveat: `PATCH` with `stock` is an absolute set. If it runs while orders are reserving stock, it overwrites their decrements. A real stock adjustment endpoint should use `$inc` with a delta.
 
-### ۱. Race condition (stock = 1)
-هر آیتم سفارش با **یک query اتمیک** رزرو می‌شود:
+## Logging
+One line per request (`METHOD path status ms user code`) plus business events: `order.created`, `order.transition`, `stock.reserve_failed`, `payment.created`, `payment.replayed`, `payment.callback applied=true|false`. Request/response bodies, tokens and secrets are never logged. Unhandled errors are logged with their stack on the server and returned to the client as a generic 500. Logs are silent under Jest (`LOG=1` to enable).
+
+## UI and the mock payment provider
+- The UI keeps the JWT in `sessionStorage` (survives reloads and the trip to the payment page; cleared when the tab closes). An expired token signs the user out.
+- **Pay** creates the payment (with the order's `Idempotency-Key`) and redirects to `/pay/:id`, a mock hosted payment page. Its Pay button calls `POST /provider/callback` on the **Next server**, which adds the shared `CALLBACK_SECRET` and forwards to the API's `/payments/callback`. The browser never sees the secret, like a real provider webhook. Set `CALLBACK_SECRET` / `API_URL` for the web process if you changed the API's defaults.
+- Reloading the payment page after paying shows the stored result and cannot charge again.
+
+## Design decisions
+
+### 1. Race condition (stock = 1)
+Every line is reserved with one atomic query:
 ```ts
 Product.findOneAndUpdate({ _id, isActive: true, stock: { $gte: qty } }, { $inc: { stock: -qty } })
 ```
-شرط و کاهش در یک عملیات روی یک document انجام می‌شود (MongoDB روی یک document قفل می‌گیرد)، پس دو درخواست همزمان نمی‌توانند هر دو موفق شوند؛ دومی `null` می‌گیرد → `409 INSUFFICIENT_STOCK`. الگوی «اول بخوان، بعد بنویس» (read-then-write) عمداً استفاده نشده چون race دارد.
+The condition and the decrement happen in a single operation on one document, which MongoDB serialises. Two concurrent buyers cannot both succeed: the second gets `null` and a `409 INSUFFICIENT_STOCK`. A "read, then write" approach would have a race window and is deliberately not used.
+If a later line of a multi-item order fails, earlier reservations are released.
 
-اگر سفارش چند آیتم داشته باشد و آیتم دوم شکست بخورد، آیتم‌های قبلی جبران (`releaseStock`) می‌شوند.
+### 2. When is stock deducted? (deliberate deviation from the task's flow)
+The task flow deducts stock after payment is confirmed. I reserve stock **when the order is created** and give it back on `Cancelled` / `Failed`. Reason: with deduction after payment, two users can both create an order and both pay for the last item, so one of them is charged for something that no longer exists.
+**Cost:** unpaid `Pending` orders hold stock. A real system needs an expiry job that cancels old `Pending` orders. Not implemented here.
 
-### ۲. موجودی چه زمانی کم می‌شود؟ (انحراف آگاهانه از فلو داخل صورت تسک)
-در فلو تسک، کاهش موجودی بعد از تأیید پرداخت است. من موجودی را **هنگام ساخت سفارش رزرو (کم)** می‌کنم و در `Cancel` یا `Failed` برمی‌گردانم. دلیل: اگر کم کردن بعد از پرداخت باشد، دو کاربر هر دو می‌توانند سفارش بسازند و پرداخت کنند و آخرین کالا دوبار فروخته می‌شود (یا باید بعد از گرفتن پول رد شود، که بدتر است).
-**هزینه:** سفارش‌های Pending که هیچ‌وقت پرداخت نمی‌شوند موجودی را قفل می‌کنند. راه‌حل واقعی: job که سفارش‌های Pending قدیمی را کنسل کند (expiry). **پیاده نشده**؛ اینجا فقط ذکر می‌کنم.
+### 3. Idempotency
+- `POST /payments`: unique index on `(userId, idempotencyKey)`. A repeated request returns the same payment with an `Idempotent-Replayed: true` header. If two identical requests race, one fails with `E11000` and is converted into a replay. The same key with a different `orderId` returns `422`.
+- A second unique, partial index (`orderId` where `status = Pending`) prevents two in-flight payments for one order under different keys (`409 PAYMENT_IN_PROGRESS`).
+- `POST /payments/callback`: the state change itself is conditional: `findOneAndUpdate({ _id, status: 'Pending' }, ...)`. Only the first callback wins; later ones (even with a different status) change nothing and return the stored result. The order transition is conditional on `Pending` as well, so an order cannot become `Paid` twice and stock cannot be returned twice.
 
-### ۳. Idempotency
-- `POST /payments`: ایندکس unique روی `(userId, idempotencyKey)`. درخواست تکراری همان Payment را با هدر `Idempotent-Replayed` برمی‌گرداند. اگر دو درخواست همزمان با یک کلید بیایند، یکی با خطای `E11000` رد می‌شود و آن را به replay تبدیل می‌کنیم. همان کلید با `orderId` دیگر → `422`.
-- اضافه بر آن، ایندکس unique جزئی (`partialFilterExpression: status=Pending`) روی `orderId` اجازه نمی‌دهد برای یک سفارش دو پرداخت **در جریان** با کلیدهای متفاوت باز شود.
-- `POST /payments/callback`: خود تغییر وضعیت شرطی است: `findOneAndUpdate({_id, status:'Pending'}, …)`. فقط اولین callback برنده است؛ بقیه (حتی با status متفاوت) هیچ تغییری نمی‌دهند و نتیجه ثبت‌شده را برمی‌گردانند. تغییر سفارش هم شرطی روی `Pending` است، پس Paid دوبار نمی‌شود و موجودی دوبار برنمی‌گردد.
+### 4. Price and amount tampering
+- Zod `.strict()` rejects unknown fields such as `price`. Prices are read from the DB and snapshotted into the order; the total is computed on the server.
+- The `amount` in `POST /payments` is only a check against the server-computed order total (`400 AMOUNT_MISMATCH`). The stored amount always comes from the order. The callback also compares its `amount` with the stored payment.
+- Money is an integer in minor units, never a float.
 
-### ۴. Price / Amount tampering
-- Zod با `.strict()` هر فیلد اضافه (مثل `price`) را رد می‌کند؛ قیمت از DB خوانده و در Order **snapshot** می‌شود، و `total` سمت سرور حساب می‌شود.
-- `amount` در `POST /payments` فقط یک **چک** است: با `order.total` مقایسه می‌شود، نابرابر → `400 AMOUNT_MISMATCH`. مبلغ ذخیره‌شده همیشه از Order است. callback هم `amount` را با Payment مقایسه می‌کند.
-- پول به صورت عدد صحیح (کوچک‌ترین واحد) نگه‌داری می‌شود، نه float.
+### 5. Order state machine
+`Pending -> Paid | Failed` only through the provider callback, `Pending -> Cancelled` only through the cancel endpoint. There is no endpoint that accepts a status. Each transition is one `findOneAndUpdate` with `status: 'Pending'` in the filter, so it is atomic.
 
-### ۵. State machine
-`Pending → Paid | Failed` فقط از callback؛ `Pending → Cancelled` فقط از endpoint cancel. endpoint عمومی برای تغییر status وجود ندارد. هر انتقال یک `findOneAndUpdate` با شرط `status: 'Pending'` است (اتمیک).
+### 6. Security
+- JWT (HS256, 1 hour), passwords hashed with `scrypt` + salt. Login returns the same error for unknown email and wrong password.
+- Users only see their own orders; someone else's order returns `404`, not `403`, so its existence is not leaked.
+- The callback is protected by a shared secret with a timing-safe comparison. In production this would be an HMAC signature over the body plus a timestamp.
+- `OrderItem` is embedded in `Order`: it is always read and written with the order and never queried alone.
 
-### ۶. Auth و Security
-- JWT (HS256، انقضا ۱ ساعت)، رمز با `scrypt` + salt. پیام خطای login برای ایمیل اشتباه و رمز اشتباه یکسان است.
-- هر کاربر فقط سفارش/پرداخت خودش را می‌بیند؛ سفارش دیگران `404` می‌دهد (نه 403) تا وجودش لو نرود.
-- callback با secret مشترک و مقایسه timing-safe محافظت می‌شود. (در واقعیت: امضای HMAC روی body + timestamp.)
-- `OrderItem` به صورت embedded داخل Order است (همیشه با Order خوانده/نوشته می‌شود و جدا کوئری نمی‌شود).
+## Indexes
 
-## Indexها
-
-| Collection | Index | چرا / کدام query |
+| Collection | Index | Why / which query |
 |---|---|---|
-| users | `email` unique | `POST /auth/login` (`findOne({email})`) و جلوگیری از ایمیل تکراری |
-| products | `createdAt: -1` | `GET /products` (sort جدیدترین) |
-| orders | `{userId: 1, createdAt: -1}` | `GET /orders` (سفارش‌های من، مرتب‌شده). پیشوند `userId` فیلتر مالکیت `GET /orders/:id` را هم پوشش می‌دهد |
-| payments | `{userId, idempotencyKey}` unique | idempotency؛ lookup در replay و تضمین یکتایی |
-| payments | `{orderId}` unique + partial (`status=Pending`) | یک پرداخت در جریان برای هر سفارش |
-| همه | `_id` (خودکار) | `findById` در callback و GET تکی |
+| users | `email` unique | `POST /auth/login` (`findOne({email})`), prevents duplicate accounts |
+| products | `createdAt: -1` | `GET /products` (newest first) |
+| orders | `{userId: 1, createdAt: -1}` | `GET /orders` (my orders, sorted). The `userId` prefix also serves the ownership filter of `GET /orders/:id` |
+| payments | `{userId, idempotencyKey}` unique | idempotency lookup and guarantee |
+| payments | `{orderId}` unique, partial (`status = Pending`) | one in-flight payment per order |
+| all | `_id` (automatic) | `findById` in callback and single-item GETs |
 
-**اگر ایندکس زیاد شود؟** هر ایندکس باید روی هر insert/update/delete به‌روز شود (write کندتر)، RAM (working set) و دیسک مصرف می‌کند، و بهینه‌ساز query ممکن است بین چند ایندکس مشابه گیج شود. برای همین فقط ایندکس‌هایی ساخته شده که یک query واقعی یا یک constraint یکتایی پشتشان است (مثلاً ایندکس `status` را عمداً نساختم چون هیچ query روی آن نداریم). بررسی با `explain()` و حذف ایندکس‌های بلااستفاده توصیه می‌شود.
+**What goes wrong with too many indexes?** Every index must be updated on each insert, update and delete, so writes get slower. Indexes use RAM (the working set) and disk, and overlapping indexes make the planner's choice harder. So I only created indexes backed by a real query or a uniqueness rule. For example there is no index on `orders.status`, because nothing queries by it. Use `explain()` to check and drop unused indexes.
 
-## محدودیت‌ها (صادقانه)
-- بدون transaction: چون replica set لازم است، از جبران دستی استفاده شد. اگر پروسه دقیقاً بین «Order→Failed» و «برگرداندن موجودی» کرش کند، موجودی نشت می‌کند. با transaction (replica set) این پنجره بسته می‌شود.
-- expiry سفارش‌های Pending، refresh token، rate limiting، و refund (پرداخت موفق برای سفارش کنسل‌شده) پیاده نشده‌اند.
-- UI (`public/index.html`) فقط playground برای تست است، نه محصول.
-# order-payment-task
+## Limitations (honest list)
+- No transactions (they need a replica set), so multi-step operations use compensation. If the process dies between "order -> Failed" and "stock released", stock leaks. Replica-set transactions would close that window.
+- Not implemented: expiry of `Pending` orders, refresh tokens, rate limiting, refunds (a successful payment for an already-cancelled order stays `Succeeded` and needs a refund path).
+- The UI is a test playground, not a product.
