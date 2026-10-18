@@ -1,5 +1,4 @@
-// Mock payment provider webhook. It runs on the Next server and holds the shared secret,
-// like a real provider would: the browser never sees CALLBACK_SECRET.
+// mock provider webhook: runs on the Next server so CALLBACK_SECRET never reaches the browser
 const API_URL = process.env.API_URL ?? 'http://localhost:3000';
 
 export async function POST(req: Request) {

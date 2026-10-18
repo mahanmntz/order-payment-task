@@ -7,11 +7,11 @@ import { useApi } from '@/lib/useApi';
 import type { PaymentInfo } from '@/lib/types';
 
 type Phase = 'loading' | 'error' | 'form' | 'success' | 'failed';
-// Realistic-looking sample card (Luhn-valid, not a real account). Editable, but nothing is validated or stored.
+// sample card data; nothing is validated or stored
 const SAMPLE_CARD = { number: '4539 1488 0343 6467', name: 'Sarah Mitchell', expiry: '09 / 29', cvc: '418' };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Mock hosted payment page: looks like a real gateway, moves no money. */
+/** Mock hosted payment page: moves no money. */
 export default function PayPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
@@ -27,7 +27,7 @@ export default function PayPage() {
     call('GET', `/payments/${id}`).then((r) => {
       if (!r.ok) { setError(r.message ?? 'Could not load this payment'); setPhase('error'); return; }
       setPayment(r.data);
-      // Already settled (e.g. page reloaded after paying): show the outcome, never charge twice.
+      // already settled: show the outcome, never charge twice
       setPhase(r.data.status === 'Succeeded' ? 'success' : r.data.status === 'Failed' ? 'failed' : 'form');
     });
   }, [id, call, router]);
@@ -36,7 +36,7 @@ export default function PayPage() {
     if (!payment || busy) return;
     setBusy(status);
     setError('');
-    // Minimum delay so the "processing" state feels like a real bank round-trip.
+    // minimum delay so it feels like a real bank round-trip
     const [r] = await Promise.all([provider({ paymentId: payment._id, status, amount: payment.amount }), sleep(status === 'succeeded' ? 2000 : 800)]);
     setBusy(null);
     if (!r.ok) return setError(r.message ?? 'Payment could not be completed. Try again.');

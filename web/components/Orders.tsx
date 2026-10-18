@@ -15,18 +15,18 @@ export default function Orders({ call, provider, orders, state, products, pay, s
   const router = useRouter();
   const [redirecting, setRedirecting] = useState(false);
 
-  // One idempotency key per order: pressing Pay twice sends the same key, so the server replays instead of creating a second payment.
+  // one key per order: a second Pay click replays instead of creating a new payment
   const doPay = async (o: Order, amount: number, goToGateway: boolean) => {
     const key = pay[o._id]?.key ?? crypto.randomUUID();
     const r = await call('POST', '/payments', { orderId: o._id, amount }, { 'Idempotency-Key': key });
     setPay((p) => ({ ...p, [o._id]: { key, paymentId: r.ok ? r.data._id : p[o._id]?.paymentId } }));
     if (r.ok && goToGateway) {
-      setRedirecting(true); // keep feedback on screen until the payment page takes over
+      setRedirecting(true); // keep feedback until the payment page takes over
       router.push(`/pay/${r.data._id}`);
-      setTimeout(() => setRedirecting(false), 10000); // safety net if navigation never completes
+      setTimeout(() => setRedirecting(false), 10000); // safety net
     }
   };
-  // Plays the payment provider; "×3" sends three identical callbacks at the same time.
+  // plays the provider; ×3 sends three identical callbacks at once
   const callback = async (o: Order, status: 'succeeded' | 'failed', times = 1) => {
     const paymentId = pay[o._id]?.paymentId;
     if (!paymentId) return;

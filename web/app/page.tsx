@@ -38,7 +38,7 @@ export default function Home() {
     setMe(null); setCart({}); setPayState({}); setOrders([]); setPanel(null); setViewState('products');
   }, []);
 
-  // Every API call goes through here: errors become toasts, an expired session signs you out.
+  // every call goes through here: errors become toasts, an expired session signs out
   const call: Call = useCallback(
     async (...args: Parameters<Call>) => {
       const r = await rawCall(...args);
@@ -74,7 +74,7 @@ export default function Home() {
 
   const refresh = useCallback(() => Promise.all([loadProducts(queryRef.current), loadOrders()]), [loadProducts, loadOrders]);
 
-  // Restore the session (also after coming back from the payment page).
+  // restore the session (also after the payment page)
   useEffect(() => {
     const t = session.token();
     const m = session.me();
@@ -83,7 +83,7 @@ export default function Home() {
   }, []);
   useEffect(() => { if (booted) loadOrders(); }, [booted, loadOrders]);
 
-  // Debounced product search (also performs the initial load).
+  // debounced search, also the initial load
   useEffect(() => {
     if (!booted) return;
     queryRef.current = query;
@@ -109,7 +109,7 @@ export default function Home() {
   };
   const onLogout = () => { signedOut(); refresh(); };
   const onAdd = (id: string) => {
-    if (cartCount === 0) setPanel('cart'); // first item opens the cart in the middle of the screen
+    if (cartCount === 0) setPanel('cart'); // the first item opens the cart
     setQty(id, (cart[id] ?? 0) + 1);
   };
 

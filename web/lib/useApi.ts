@@ -7,7 +7,7 @@ export type LogEntry = { id: number; title: string; curl: string; status: number
 
 const API_DIRECT = 'http://localhost:3000'; // only used to print an equivalent curl command
 
-/** fetch that never throws: network failures and non-JSON bodies become ordinary error results. */
+/** fetch that never throws */
 async function request(url: string, method: string, headers: Record<string, string>, body?: unknown) {
   const t = performance.now();
   let res: Response | null = null;
@@ -47,7 +47,7 @@ export function useApi() {
     [record],
   );
 
-  // The payment provider's webhook. Next's server adds the shared secret, so it never reaches the browser.
+  // provider webhook, sent through Next's server which adds the secret
   const provider = useCallback(
     async (body: ProviderBody): Promise<ApiResult> => {
       const { result, json } = await request('/provider/callback', 'POST', { 'content-type': 'application/json' }, body);

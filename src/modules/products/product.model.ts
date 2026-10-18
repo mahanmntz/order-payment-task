@@ -1,16 +1,15 @@
 import { Schema, model } from 'mongoose';
 
-// Prices are integer minor units to avoid float errors.
 const productSchema = new Schema(
   {
     name: { type: String, required: true },
     price: { type: Number, required: true, min: 0 },
-    stock: { type: Number, required: true, min: 0 }, // schema guard; the atomic filter is the real protection
+    stock: { type: Number, required: true, min: 0 },
     isActive: { type: Boolean, default: true },
-    image: String, // URL or path; optional
+    image: String,
   },
   { timestamps: true },
 );
-productSchema.index({ createdAt: -1 }); // GET /products sorted newest first
+productSchema.index({ createdAt: -1 });
 
 export const Product = model('Product', productSchema);

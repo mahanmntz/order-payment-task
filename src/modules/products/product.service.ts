@@ -3,23 +3,19 @@ import { AppError } from '../../shared/errors';
 import { logger } from '../../shared/logger';
 import { Product } from './product.model';
 
-export type Reserved = { productId: Types.ObjectId; name: string; price: number; quantity: number };
+type Line = { productId: Types.ObjectId; quantity?: number | null };
 
-/** Return reserved stock to inventory. */
-export const releaseStock = (items: ReadonlyArray<{ productId: Types.ObjectId; quantity?: number | null }>) =>
-  Product.bulkWrite(items.map((i) => ({ updateOne: { filter: { _id: i.productId }, update: { $inc: { stock: i.quantity ?? 0 } } } })));
+export const releaseStock = (lines: readonly Line[]) =>
+  Product.bulkWrite(lines.map(({ productId, quantity }) => ({ updateOne: { filter: { _id: productId }, update: { $inc: { stock: quantity ?? 0 } } } })));
 
-/**
- * Atomically reserve stock for every line and return price snapshots.
- * All-or-nothing: if one line fails, earlier reservations are released.
- */
-export async function reserveStock(items: { productId: string; quantity: number }[]): Promise<Reserved[]> {
-  const qty = new Map<string, number>(); // merge duplicate lines
+/** All-or-nothing: reserves every line atomically and returns price snapshots. */
+export async function reserveStock(items: { productId: string; quantity: number }[]) {
+  const qty = new Map<string, number>();
   items.forEach((i) => qty.set(i.productId, (qty.get(i.productId) ?? 0) + i.quantity));
 
-  const reserved: Reserved[] = [];
+  const reserved: { productId: Types.ObjectId; name: string; price: number; quantity: number }[] = [];
   for (const [productId, quantity] of qty) {
-    // Check-and-decrement in ONE atomic operation: succeeds only if the product is active AND enough stock remains.
+    // one atomic check-and-decrement: no read-then-write race
     const p = await Product.findOneAndUpdate({ _id: productId, isActive: true, stock: { $gte: quantity } }, { $inc: { stock: -quantity } }, { returnDocument: 'after' });
     if (!p) {
       await releaseStock(reserved);

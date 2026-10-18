@@ -12,7 +12,7 @@ const createBody = z.object({ orderId: objectId, amount: money }).strict();
 const callbackBody = z.object({ paymentId: objectId, status: z.enum(['succeeded', 'failed']), amount: money }).strict();
 const keyHeader = z.string().trim().min(8, 'Idempotency-Key header (min 8 chars) is required').max(128);
 
-// The callback comes from the payment provider, not a user: shared secret instead of JWT.
+// the provider is not a user: shared secret instead of JWT
 const providerAuth: RequestHandler = (req, _res, next) =>
   safeEqual(req.header('x-callback-secret') ?? '', config.callbackSecret) ? next() : next(new AppError(401, 'UNAUTHORIZED', 'Invalid callback credentials'));
 

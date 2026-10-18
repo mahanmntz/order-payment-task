@@ -5,9 +5,8 @@ import { auth, me } from '../auth';
 import { cancelOrder, createOrder, getOrder, listOrders } from './order.service';
 
 export const orderRouter = Router();
-orderRouter.use('/orders', auth); // scoped: this router is mounted at the root
+orderRouter.use('/orders', auth); // scoped: the router is mounted at the root
 
-// .strict(): any client-supplied price/total is rejected.
 const body = z
   .object({ items: z.array(z.object({ productId: objectId, quantity: z.number().int().min(1).max(1000) }).strict()).min(1).max(100) })
   .strict();
@@ -22,7 +21,6 @@ orderRouter.get('/orders', async (_req, res) => {
 orderRouter.get('/orders/:id', async (req, res) => {
   res.json({ success: true, data: await getOrder(me(res), objectId.parse(req.params.id)) });
 });
-// No PATCH /orders/:id: clients cannot set a status. Cancelling is the only client-driven transition.
 orderRouter.post('/orders/:id/cancel', async (req, res) => {
   res.json({ success: true, data: await cancelOrder(me(res), objectId.parse(req.params.id)) });
 });

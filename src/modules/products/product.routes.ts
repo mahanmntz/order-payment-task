@@ -9,11 +9,9 @@ export const productRouter = Router();
 
 const body = z.object({ name: z.string().min(1), price: money, stock: z.number().int().min(0), isActive: z.boolean().default(true), image: z.string().max(300).optional() }).strict();
 
-const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const listQuery = z.object({ q: z.string().trim().max(50).optional() });
+const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-// ?q= is a case-insensitive name search (escaped, so it can't be abused as a regex). Fine for a small catalog;
-// at scale use a text index / Atlas Search.
 productRouter.get('/products', async (req, res) => {
   const { q } = listQuery.parse(req.query);
   const filter = q ? { name: { $regex: escapeRegex(q), $options: 'i' } } : {};

@@ -1,4 +1,4 @@
-// Local MongoDB for development without installing anything: `npm run db`. Data persists in ./.data
+// npm run db: local MongoDB on :27017 without installing anything (data in ./.data)
 import { mkdirSync } from 'fs';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 

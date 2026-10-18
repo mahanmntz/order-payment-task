@@ -4,7 +4,7 @@ export type OrderItem = { productId: string; name: string; price: number; quanti
 export type OrderStatus = 'Pending' | 'Paid' | 'Cancelled' | 'Failed';
 export type Order = { _id: string; total: number; status: OrderStatus; items: OrderItem[]; createdAt: string };
 export type PaymentInfo = { _id: string; orderId: string; amount: number; status: 'Pending' | 'Succeeded' | 'Failed' };
-export type PayState = Record<string, { key: string; paymentId?: string }>; // per order: idempotency key + created payment
+export type PayState = Record<string, { key: string; paymentId?: string }>;
 export type LoadState = 'loading' | 'ready' | 'error';
 
 export type ApiResult = { ok: boolean; status: number; data: any; message?: string; code?: string; replayed?: boolean };

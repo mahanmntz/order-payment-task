@@ -9,10 +9,9 @@ type Props = {
   setQty: (id: string, qty: number) => void; onClose: () => void; onPlaced: () => void;
 };
 
-/** Cart as a sheet in the middle of the screen. */
 export default function CartSheet({ call, products, cart, setQty, onClose, onPlaced }: Props) {
   const lines = Object.entries(cart).map(([id, quantity]) => ({ id, quantity, product: products.find((p) => p._id === id) }));
-  const total = lines.reduce((s, l) => s + (l.product?.price ?? 0) * l.quantity, 0); // display only; the server computes the real total
+  const total = lines.reduce((s, l) => s + (l.product?.price ?? 0) * l.quantity, 0); // display only; the server computes the total
 
   const place = async (extra: object = {}) => {
     const r = await call('POST', '/orders', { items: lines.map((l) => ({ productId: l.id, quantity: l.quantity, ...extra })) });

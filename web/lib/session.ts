@@ -2,7 +2,7 @@ import type { Me, PayState } from './types';
 
 export type View = 'products' | 'orders';
 
-// sessionStorage: survives reloads and the trip to the payment page, cleared when the tab closes.
+// sessionStorage: survives reloads and the payment redirect
 const read = (k: string) => { try { return window.sessionStorage.getItem(k); } catch { return null; } };
 const write = (k: string, v: string | null) => {
   try { v === null ? window.sessionStorage.removeItem(k) : window.sessionStorage.setItem(k, v); } catch { /* storage unavailable */ }

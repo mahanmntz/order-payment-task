@@ -16,8 +16,7 @@ export async function createPayment(user: Me, key: string, orderId: string, amou
 
   const order = await getOrder(user, orderId);
   if (order.status !== 'Pending') throw new AppError(409, 'INVALID_STATE_TRANSITION', `Order is ${order.status}`);
-  // The client-sent amount is only a check; the server's own total is the truth.
-  if (amount !== order.total) throw new AppError(400, 'AMOUNT_MISMATCH', 'Amount does not match order total');
+  if (amount !== order.total) throw new AppError(400, 'AMOUNT_MISMATCH', 'Amount does not match order total'); // the client amount is only a check
 
   try {
     const payment = await Payment.create({ userId: user.id, orderId, amount: order.total, idempotencyKey: key });
@@ -25,7 +24,7 @@ export async function createPayment(user: Me, key: string, orderId: string, amou
     return { payment, replayed: false };
   } catch (e: any) {
     if (e?.code !== 11000) throw e;
-    // Lost a race on the same key -> replay; otherwise another payment is in flight for this order.
+    // duplicate key: either we lost a race on the same key (replay) or another payment is in flight for this order
     const raced = await replay();
     if (raced) return raced;
     throw new AppError(409, 'PAYMENT_IN_PROGRESS', 'A payment is already in progress for this order');
@@ -37,12 +36,12 @@ export async function handleCallback(paymentId: string, status: 'succeeded' | 'f
   if (!existing) throw new AppError(404, 'PAYMENT_NOT_FOUND', 'Payment not found');
   if (existing.amount !== amount) throw new AppError(400, 'AMOUNT_MISMATCH', 'Amount does not match payment');
 
-  // First callback wins; later ones (even with a different status) are no-ops that return the stored outcome.
+  // the first callback wins; later ones change nothing
   const updated = await Payment.findOneAndUpdate({ _id: paymentId, status: 'Pending' }, { status: status === 'succeeded' ? 'Succeeded' : 'Failed' }, { returnDocument: 'after' });
   const payment = updated ?? (await Payment.findById(paymentId))!;
   logger.info('payment.callback', { payment: paymentId, received: status, final: payment.status, applied: !!updated });
 
-  // Idempotent too (conditional on Pending), so replays and retries after a partial failure can't double-apply.
+  // runs on every callback so a retry repairs a crash between the two updates
   await settleOrder(payment.orderId, payment.status === 'Succeeded' ? 'Paid' : 'Failed');
   return payment;
 }
