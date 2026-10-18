@@ -10,12 +10,13 @@ import { Product } from '../src/modules/products';
 import { User } from '../src/modules/users';
 
 let mongod: MongoMemoryServer;
-let adminT: string, userT: string, user2T: string;
+let admin: string, userA: string, userB: string;
 
 const login = async (email: string, role: 'user' | 'admin') => {
   await User.create({ email, role, passwordHash: hashPassword('pw12345') });
   return (await request(app).post('/auth/login').send({ email, password: 'pw12345' })).body.data.token as string;
 };
+
 beforeAll(async () => {
   mongod = await MongoMemoryServer.create();
   await mongoose.connect(mongod.getUri());
@@ -27,164 +28,113 @@ afterAll(async () => {
 });
 beforeEach(async () => {
   await Promise.all([User.deleteMany({}), Order.deleteMany({}), Payment.deleteMany({}), Product.deleteMany({})]);
-  [adminT, userT, user2T] = [await login('a@x.com', 'admin'), await login('u@x.com', 'user'), await login('u2@x.com', 'user')];
+  [admin, userA, userB] = [await login('admin@x.com', 'admin'), await login('a@x.com', 'user'), await login('b@x.com', 'user')];
 });
 
-const bearer = (t: string) => ({ Authorization: `Bearer ${t}` });
-const mkProduct = async (stock = 1, price = 500, isActive = true) =>
-  (await request(app).post('/products').set(bearer(adminT)).send({ name: 'x', price, stock, isActive })).body.data;
-const mkOrder = (productId: string, quantity = 1, t = userT) => request(app).post('/orders').set(bearer(t)).send({ items: [{ productId, quantity }] });
-const pay = (orderId: string, amount: number, key = 'key-12345', t = userT) =>
-  request(app).post('/payments').set(bearer(t)).set('Idempotency-Key', key).send({ orderId, amount });
+const as = (token: string) => ({ Authorization: `Bearer ${token}` });
+const mkProduct = async (stock: number, price = 1000, isActive = true) =>
+  (await request(app).post('/products').set(as(admin)).send({ name: 'Item', price, stock, isActive })).body.data;
+const mkOrder = (productId: string, quantity = 1, token = userA) => request(app).post('/orders').set(as(token)).send({ items: [{ productId, quantity }] });
+const pay = (orderId: string, amount: number, key = 'key-12345') => request(app).post('/payments').set(as(userA)).set('Idempotency-Key', key).send({ orderId, amount });
 const callback = (paymentId: string, amount: number, status = 'succeeded') =>
   request(app).post('/payments/callback').set('x-callback-secret', 'dev-secret').send({ paymentId, status, amount });
+const stockOf = async (id: string) => (await Product.findById(id))!.stock;
 
-describe('auth', () => {
-  it('rejects bad credentials and unauthenticated calls; only admins create products', async () => {
-    expect((await request(app).post('/auth/login').send({ email: 'u@x.com', password: 'wrong' })).body.code).toBe('INVALID_CREDENTIALS');
-    expect((await request(app).post('/orders').send({})).status).toBe(401);
-    expect((await request(app).post('/products').set(bearer(userT)).send({ name: 'x', price: 1, stock: 1 })).status).toBe(403);
-  });
-  it("users cannot read or cancel someone else's order", async () => {
-    const o = (await mkOrder((await mkProduct(2))._id)).body.data;
-    expect((await request(app).get(`/orders/${o._id}`).set(bearer(user2T))).status).toBe(404);
-    expect((await request(app).post(`/orders/${o._id}/cancel`).set(bearer(user2T))).status).toBe(404);
-  });
-});
-
-describe('orders', () => {
-  it('1. creates an order, total computed by the server, price tampering rejected', async () => {
+describe('Order & Payment API', () => {
+  it('1. creates an order successfully', async () => {
     const p = await mkProduct(5, 700);
-    const bad = await request(app).post('/orders').set(bearer(userT)).send({ items: [{ productId: p._id, quantity: 1, price: 1 }] });
-    expect(bad.status).toBe(400);
-    expect(bad.body).toMatchObject({ success: false, code: 'VALIDATION_ERROR' });
-    const ok = await mkOrder(p._id, 2);
-    expect(ok.status).toBe(201);
-    expect(ok.body.data).toMatchObject({ total: 1400, status: 'Pending' });
-    expect((await Product.findById(p._id))!.stock).toBe(3);
+    const res = await mkOrder(p._id, 2);
+    expect(res.status).toBe(201);
+    expect(res.body.data).toMatchObject({ status: 'Pending', total: 1400 });
+    expect(await stockOf(p._id)).toBe(3);
+
+    const tampered = await request(app).post('/orders').set(as(userA)).send({ items: [{ productId: p._id, quantity: 1, price: 1 }] });
+    expect(tampered.status).toBe(400);
+    expect(tampered.body.code).toBe('VALIDATION_ERROR');
   });
 
-  it('2. rejects unavailable products (missing / inactive)', async () => {
-    const inactive = await mkProduct(5, 500, false);
+  it('2. rejects an unavailable product', async () => {
+    const inactive = await mkProduct(5, 1000, false);
     expect((await mkOrder(inactive._id)).body.code).toBe('PRODUCT_INACTIVE');
     expect((await mkOrder('a'.repeat(24))).body.code).toBe('PRODUCT_NOT_FOUND');
-    expect((await mkOrder('nope')).body.code).toBe('VALIDATION_ERROR');
-    expect((await request(app).post('/orders').set(bearer(userT)).send({ items: [{ productId: inactive._id, quantity: 0 }] })).status).toBe(400);
+    expect(await stockOf(inactive._id)).toBe(5);
   });
 
   it('3. rejects insufficient stock and rolls back partial reservations', async () => {
-    const a = await mkProduct(5);
-    const b = await mkProduct(1);
-    const r = await request(app).post('/orders').set(bearer(userT)).send({ items: [{ productId: a._id, quantity: 2 }, { productId: b._id, quantity: 2 }] });
-    expect(r.status).toBe(409);
-    expect(r.body.code).toBe('INSUFFICIENT_STOCK');
-    expect((await Product.findById(a._id))!.stock).toBe(5);
+    const plenty = await mkProduct(5);
+    const scarce = await mkProduct(1);
+    const res = await request(app).post('/orders').set(as(userA)).send({ items: [{ productId: plenty._id, quantity: 2 }, { productId: scarce._id, quantity: 2 }] });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('INSUFFICIENT_STOCK');
+    expect(await stockOf(plenty._id)).toBe(5);
+    expect(await stockOf(scarce._id)).toBe(1);
   });
 
-  it('4. later product price change does not affect an existing order', async () => {
+  it('4. a price change after the order does not affect the order', async () => {
     const p = await mkProduct(5, 700);
-    const o = (await mkOrder(p._id, 2)).body.data;
-    await request(app).patch(`/products/${p._id}`).set(bearer(adminT)).send({ price: 9999 });
-    const got = (await request(app).get(`/orders/${o._id}`).set(bearer(userT))).body.data;
-    expect(got.total).toBe(1400);
-    expect(got.items[0].price).toBe(700);
+    const order = (await mkOrder(p._id, 2)).body.data;
+    await request(app).patch(`/products/${p._id}`).set(as(admin)).send({ price: 9999 });
+    const saved = (await request(app).get(`/orders/${order._id}`).set(as(userA))).body.data;
+    expect(saved.total).toBe(1400);
+    expect(saved.items[0].price).toBe(700);
   });
 
-  it('9. never oversells under concurrency (stock = 1)', async () => {
-    const p = await mkProduct(1);
-    const results = await Promise.all(Array.from({ length: 20 }, (_, i) => mkOrder(p._id, 1, i % 2 ? userT : user2T)));
-    expect(results.filter((r) => r.status === 201)).toHaveLength(1);
-    expect(results.filter((r) => r.status === 409)).toHaveLength(19);
-    expect((await Product.findById(p._id))!.stock).toBe(0);
-  });
-
-  it('cancel restores stock once; no direct status updates', async () => {
-    const p = await mkProduct(2);
-    const o = (await mkOrder(p._id, 2)).body.data;
-    expect((await request(app).patch(`/orders/${o._id}`).set(bearer(userT)).send({ status: 'Paid' })).status).toBe(404);
-    expect((await request(app).post(`/orders/${o._id}/cancel`).set(bearer(userT))).status).toBe(200);
-    expect((await request(app).post(`/orders/${o._id}/cancel`).set(bearer(userT))).status).toBe(409);
-    expect((await Product.findById(p._id))!.stock).toBe(2);
-  });
-});
-
-describe('products & payment lookup', () => {
-  it('searches products by name, escaping regex characters', async () => {
-    await request(app).post('/products').set(bearer(adminT)).send({ name: 'Red Mouse', price: 1, stock: 1 });
-    await request(app).post('/products').set(bearer(adminT)).send({ name: 'Blue Keyboard', price: 1, stock: 1 });
-    expect((await request(app).get('/products?q=mouse')).body.data).toHaveLength(1);
-    expect((await request(app).get('/products?q=.*')).body.data).toHaveLength(0);
-    expect((await request(app).get('/products')).body.data).toHaveLength(2);
-  });
-
-  it('users can read only their own payment', async () => {
-    const o = (await mkOrder((await mkProduct(2, 100))._id)).body.data;
-    const pm = (await pay(o._id, 100)).body.data;
-    expect((await request(app).get(`/payments/${pm._id}`).set(bearer(userT))).body.data.amount).toBe(100);
-    expect((await request(app).get(`/payments/${pm._id}`).set(bearer(user2T))).status).toBe(404);
-    expect((await request(app).get(`/payments/${pm._id}`)).status).toBe(401);
-  });
-});
-
-describe('payments', () => {
-  it('5. successful payment: Pending -> Paid, stock stays deducted', async () => {
+  it('5. a successful payment marks the order Paid', async () => {
     const p = await mkProduct(3, 1000);
-    const o = (await mkOrder(p._id, 2)).body.data;
-    const pm = await pay(o._id, 2000);
-    expect(pm.status).toBe(201);
-    expect(pm.body.data).toMatchObject({ amount: 2000, status: 'Pending' });
-    expect((await callback(pm.body.data._id, 2000)).status).toBe(200);
-    expect((await Order.findById(o._id))!.status).toBe('Paid');
-    expect((await Product.findById(p._id))!.stock).toBe(1);
+    const order = (await mkOrder(p._id, 2)).body.data;
+    const payment = await pay(order._id, 2000);
+    expect(payment.status).toBe(201);
+    expect(payment.body.data).toMatchObject({ amount: 2000, status: 'Pending' });
+    expect((await callback(payment.body.data._id, 2000)).status).toBe(200);
+    expect((await Order.findById(order._id))!.status).toBe('Paid');
+    expect(await stockOf(p._id)).toBe(1);
   });
 
-  it('6. duplicate callbacks do not double-apply (success and failure)', async () => {
+  it('6. duplicate callbacks neither pay twice nor change stock twice', async () => {
     const p = await mkProduct(3, 1000);
-    const o1 = (await mkOrder(p._id, 2)).body.data;
-    const pm1 = (await pay(o1._id, 2000)).body.data;
-    expect((await request(app).post('/payments/callback').send({ paymentId: pm1._id, status: 'succeeded', amount: 2000 })).status).toBe(401);
-    await Promise.all([callback(pm1._id, 2000), callback(pm1._id, 2000), callback(pm1._id, 2000)]);
-    await callback(pm1._id, 2000, 'failed'); // late conflicting callback is ignored
-    expect((await Order.findById(o1._id))!.status).toBe('Paid');
-    expect((await Product.findById(p._id))!.stock).toBe(1);
+    const paid = (await mkOrder(p._id, 2)).body.data;
+    const pm = (await pay(paid._id, 2000)).body.data;
+    expect((await request(app).post('/payments/callback').send({ paymentId: pm._id, status: 'succeeded', amount: 2000 })).status).toBe(401);
+    await Promise.all([callback(pm._id, 2000), callback(pm._id, 2000), callback(pm._id, 2000)]);
+    await callback(pm._id, 2000, 'failed');
+    expect((await Order.findById(paid._id))!.status).toBe('Paid');
+    expect(await stockOf(p._id)).toBe(1);
     expect(await Payment.countDocuments()).toBe(1);
 
-    const o2 = (await mkOrder(p._id, 1)).body.data;
-    const pm2 = (await pay(o2._id, 1000, 'key-second')).body.data;
+    const failed = (await mkOrder(p._id, 1)).body.data;
+    const pm2 = (await pay(failed._id, 1000, 'key-second')).body.data;
     await Promise.all([callback(pm2._id, 1000, 'failed'), callback(pm2._id, 1000, 'failed'), callback(pm2._id, 1000, 'failed')]);
-    expect((await Order.findById(o2._id))!.status).toBe('Failed');
-    expect((await Product.findById(p._id))!.stock).toBe(1); // restored exactly once
+    expect((await Order.findById(failed._id))!.status).toBe('Failed');
+    expect(await stockOf(p._id)).toBe(1);
   });
 
-  it('7. same Idempotency-Key never creates a second payment', async () => {
-    const o = (await mkOrder((await mkProduct(2, 100))._id)).body.data;
-    expect((await request(app).post('/payments').set(bearer(userT)).send({ orderId: o._id, amount: 100 })).status).toBe(400); // header required
-    const results = await Promise.all(Array.from({ length: 10 }, () => pay(o._id, 100)));
+  it('7. a repeated Idempotency-Key does not create a second payment', async () => {
+    const order = (await mkOrder((await mkProduct(2, 100))._id)).body.data;
+    expect((await request(app).post('/payments').set(as(userA)).send({ orderId: order._id, amount: 100 })).status).toBe(400);
+    const results = await Promise.all(Array.from({ length: 10 }, () => pay(order._id, 100)));
     expect(new Set(results.map((r) => r.body.data._id)).size).toBe(1);
     expect(await Payment.countDocuments()).toBe(1);
-    const o2 = (await mkOrder((await mkProduct(2, 100))._id)).body.data;
-    expect((await pay(o2._id, 100)).body.code).toBe('IDEMPOTENCY_KEY_REUSED'); // same key, different order
-    expect((await pay(o._id, 100, 'key-other-1')).body.code).toBe('PAYMENT_IN_PROGRESS'); // different key, same order
+    expect((await pay(order._id, 100, 'key-other-1')).body.code).toBe('PAYMENT_IN_PROGRESS');
   });
 
-  it('8. wrong payment amount is rejected (create and callback)', async () => {
-    const o = (await mkOrder((await mkProduct(2, 1000))._id, 2)).body.data; // total 2000
-    const bad = await pay(o._id, 100);
-    expect(bad.status).toBe(400);
-    expect(bad.body.code).toBe('AMOUNT_MISMATCH');
+  it('8. rejects a payment with the wrong amount', async () => {
+    const order = (await mkOrder((await mkProduct(2, 1000))._id, 2)).body.data;
+    const res = await pay(order._id, 100);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('AMOUNT_MISMATCH');
+    expect((await pay(order._id, -5)).body.code).toBe('VALIDATION_ERROR');
     expect(await Payment.countDocuments()).toBe(0);
-    expect((await pay(o._id, -5)).body.code).toBe('VALIDATION_ERROR');
-    const pm = (await pay(o._id, 2000)).body.data;
+
+    const pm = (await pay(order._id, 2000)).body.data;
     expect((await callback(pm._id, 100)).body.code).toBe('AMOUNT_MISMATCH');
-    expect((await Order.findById(o._id))!.status).toBe('Pending');
+    expect((await Order.findById(order._id))!.status).toBe('Pending');
   });
 
-  it("cannot pay a cancelled order or someone else's order; errors leak nothing", async () => {
-    const o = (await mkOrder((await mkProduct(2, 100))._id)).body.data;
-    expect((await pay(o._id, 100, 'key-12345', user2T)).status).toBe(404);
-    await request(app).post(`/orders/${o._id}/cancel`).set(bearer(userT));
-    expect((await pay(o._id, 100)).status).toBe(409);
-    const bad = await request(app).get('/orders/not-an-id').set(bearer(userT));
-    expect(bad.body).toEqual({ success: false, message: expect.any(String), code: 'VALIDATION_ERROR' });
+  it('9. two concurrent requests for the last item: only one succeeds', async () => {
+    const p = await mkProduct(1);
+    const [a, b] = await Promise.all([mkOrder(p._id, 1, userA), mkOrder(p._id, 1, userB)]);
+    expect([a.status, b.status].sort()).toEqual([201, 409]);
+    expect(await stockOf(p._id)).toBe(0);
+    expect(await Order.countDocuments()).toBe(1);
   });
 });

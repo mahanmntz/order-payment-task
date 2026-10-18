@@ -15,7 +15,11 @@
   "jest": {
     "preset": "ts-jest",
     "testEnvironment": "node",
-    "testTimeout": 60000
+    "testTimeout": 60000,
+    "verbose": true,
+    "reporters": [
+      "default"
+    ]
   },
   "dependencies": {
     "express": "^5.3.0",
